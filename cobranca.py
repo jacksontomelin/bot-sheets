@@ -93,22 +93,104 @@ def calcular_cobranca(data_ini: date, data_fim: date, loja_filtro: str | None = 
         total = 0.0
         qtd = defaultdict(int)
 
+        # Detecta combos: mesmo cliente + mesma data = PROC_VEND + PROC_COMP -> COMBO R$125
+        # Agrupa por (cliente, data) para detectar pares
+        grupos: dict = defaultdict(list)
         for r in itens_loja:
-            svc = sh._col(r, "servico")
-            cobrados = classificar_linha(svc)
-            if not cobrados:
-                continue
-            for tipo, valor in cobrados:
+            cliente = sh._col(r, "cliente").upper().strip()
+            data    = sh._col(r, "data")
+            grupos[(cliente, data)].append(r)
+
+        processados: set = set()
+
+        for (cliente, data), grupo in grupos.items():
+            tipos_grupo = [(r, classificar_linha(sh._col(r, "servico"))) for r in grupo]
+
+            # Separa linhas por tipo
+            proc_vend_rows = [r for r, t in tipos_grupo if any(tp in ("PROC_VEND",) for tp, _ in t)]
+            proc_comp_rows = [r for r, t in tipos_grupo if any(tp in ("PROC_COMP",) for tp, _ in t)]
+            combo_rows     = [r for r, t in tipos_grupo if any(tp in ("COMBO",) for tp, _ in t)]
+            servico_rows   = [r for r, t in tipos_grupo if any(tp in ("SERVICO",) for tp, _ in t)]
+
+            # Se tem PROC_VEND e PROC_COMP separados = COMBO R$125 (nao soma)
+            if proc_vend_rows and proc_comp_rows:
+                r_ref = proc_vend_rows[0]
                 linhas.append({
-                    "data":    sh._col(r, "data"),
+                    "data":    data,
+                    "cliente": sh._col(r_ref, "cliente"),
+                    "placa":   sh._col(r_ref, "placa"),
+                    "servico": "COMBO (Proc V + Proc C)",
+                    "tipo":    "COMBO",
+                    "valor":   PRECO_COMBO,
+                })
+                total += PRECO_COMBO
+                qtd["COMBO"] += 1
+                for r in proc_vend_rows + proc_comp_rows:
+                    processados.add(id(r))
+
+            # COMBO numa linha so (ASS VEND + ASS COMP)
+            for r in combo_rows:
+                if id(r) in processados:
+                    continue
+                linhas.append({
+                    "data":    data,
                     "cliente": sh._col(r, "cliente"),
                     "placa":   sh._col(r, "placa"),
-                    "servico": svc,
-                    "tipo":    tipo,
-                    "valor":   valor,
+                    "servico": sh._col(r, "servico"),
+                    "tipo":    "COMBO",
+                    "valor":   PRECO_COMBO,
                 })
-                total += valor
-                qtd[tipo] += 1
+                total += PRECO_COMBO
+                qtd["COMBO"] += 1
+                processados.add(id(r))
+
+            # PROC_VEND sozinho
+            for r in proc_vend_rows:
+                if id(r) in processados:
+                    continue
+                linhas.append({
+                    "data":    data,
+                    "cliente": sh._col(r, "cliente"),
+                    "placa":   sh._col(r, "placa"),
+                    "servico": sh._col(r, "servico"),
+                    "tipo":    "PROC_VEND",
+                    "valor":   PRECO_PROC_VEND,
+                })
+                total += PRECO_PROC_VEND
+                qtd["PROC_VEND"] += 1
+                processados.add(id(r))
+
+            # PROC_COMP sozinho
+            for r in proc_comp_rows:
+                if id(r) in processados:
+                    continue
+                linhas.append({
+                    "data":    data,
+                    "cliente": sh._col(r, "cliente"),
+                    "placa":   sh._col(r, "placa"),
+                    "servico": sh._col(r, "servico"),
+                    "tipo":    "PROC_COMP",
+                    "valor":   PRECO_PROC_COMP,
+                })
+                total += PRECO_PROC_COMP
+                qtd["PROC_COMP"] += 1
+                processados.add(id(r))
+
+            # SERVICO (ATPV, ASS VEND, CV etc)
+            for r in servico_rows:
+                if id(r) in processados:
+                    continue
+                linhas.append({
+                    "data":    data,
+                    "cliente": sh._col(r, "cliente"),
+                    "placa":   sh._col(r, "placa"),
+                    "servico": sh._col(r, "servico"),
+                    "tipo":    "SERVICO",
+                    "valor":   PRECO_SERVICO,
+                })
+                total += PRECO_SERVICO
+                qtd["SERVICO"] += 1
+                processados.add(id(r))
 
         resultado[loja] = {
             "itens":         sorted(linhas, key=lambda x: x["data"]),
