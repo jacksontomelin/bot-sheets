@@ -97,7 +97,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "• /grupos — por grupo\n"
         "• /pagamentos — formas de pagamento\n\n"
         + b("🔍 Busca") + "\n"
-        "• /buscar nome ou placa\n\n"
+        "• /buscar nome ou placa\n"
+        "• /loja nome — painel completo da loja\n\n"
         "🔄 /atualizar — forca atualizacao\n"
     )
     await update.message.reply_text(texto, parse_mode="HTML", reply_markup=kb_principal())
@@ -503,7 +504,48 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("op_painel:"):
         op_nome = ":".join(query.data.split(":")[1:])
         await _mostrar_painel_op(msg, op_nome)
-        return
+
+    elif query.data.startswith("ok_proc:"):
+        row_val = query.data.split(":")[1]
+        try:
+            if row_val == "TODAS":
+                hoje = date.today()
+                pend = sh.procuracoes_pendentes(hoje, hoje)
+                count = 0
+                for r in pend:
+                    rn = r.get("__row__", 0)
+                    if rn:
+                        sh.marcar_procuracao_ok(rn)
+                        count += 1
+                await msg.reply_text("✅ {} procuracoes marcadas como OK!".format(count))
+            else:
+                sh.marcar_procuracao_ok(int(row_val))
+                await msg.reply_text("✅ Procuracao marcada como OK!")
+        except Exception as e:
+            await msg.reply_text("Erro: {}".format(e))
+
+    elif query.data.startswith("ok_video:"):
+        row_val = query.data.split(":")[1]
+        try:
+            if row_val == "TODOS":
+                hoje = date.today()
+                pend = sh.videos_pendentes(hoje, hoje)
+                count = 0
+                for r in pend:
+                    rn = r.get("__row__", 0)
+                    if rn:
+                        sh.marcar_video_ok(rn)
+                        count += 1
+                await msg.reply_text("✅ {} videos marcados como OK!".format(count))
+            else:
+                sh.marcar_video_ok(int(row_val))
+                await msg.reply_text("✅ Video marcado como OK!")
+        except Exception as e:
+            await msg.reply_text("Erro: {}".format(e))
+
+    elif query.data.startswith("rel_pdf:"):
+        empresa_key = query.data.split(":")[1]
+        await _gerar_relatorio_pdf(msg, empresa_key)
 
     # Cobranca flow
     msg = query.message
@@ -570,6 +612,10 @@ async def texto_livre(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _grupos(update)
     elif any(w in txt for w in ["pagamento", "pix"]):
         await _pagamentos(update)
+    elif txt.startswith("loja ") or txt.startswith("/loja "):
+        termo = txt.replace("loja ", "").replace("/loja ", "").strip()
+        ctx.args = termo.split()
+        await cmd_painel_loja(update, ctx)
     elif any(w in txt for w in ["cobranca", "cobrar", "fatura"]):
         await _cobranca_menu(update)
     else:
@@ -974,12 +1020,28 @@ async def cmd_sem_movimento(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_painel_loja(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = get_msg(update)
-    # Se passou argumento, usa direto
     if hasattr(ctx, 'args') and ctx.args:
-        loja_nome = " ".join(ctx.args)
-        await _mostrar_painel_loja(msg, loja_nome)
+        termo = " ".join(ctx.args)
+        hoje = date.today()
+        ini = date(hoje.year, hoje.month, 1)
+        lojas_encontradas = ex.buscar_loja(termo, ini, hoje)
+        if len(lojas_encontradas) == 1:
+            await _mostrar_painel_loja(msg, lojas_encontradas[0])
+        elif len(lojas_encontradas) > 1:
+            botoes = []
+            for i in range(0, len(lojas_encontradas), 2):
+                linha = [InlineKeyboardButton(lojas_encontradas[i][:25], callback_data="loja_painel:{}".format(lojas_encontradas[i][:35]))]
+                if i+1 < len(lojas_encontradas):
+                    linha.append(InlineKeyboardButton(lojas_encontradas[i+1][:25], callback_data="loja_painel:{}".format(lojas_encontradas[i+1][:35])))
+                botoes.append(linha)
+            await msg.reply_text(
+                "Encontrei {} lojas com {}. Selecione:".format(len(lojas_encontradas), termo),
+                reply_markup=InlineKeyboardMarkup(botoes)
+            )
+        else:
+            await msg.reply_text("Nenhuma loja encontrada com: {}".format(termo))
         return
-    # Senao mostra teclado de lojas
+    # Sem argumento: mostra todas as lojas do mes
     hoje = date.today()
     ini = date(hoje.year, hoje.month, 1)
     try:
@@ -994,7 +1056,7 @@ async def cmd_painel_loja(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 linha.append(InlineKeyboardButton(lojas[i+1][:25], callback_data="loja_painel:{}".format(lojas[i+1][:35])))
             botoes.append(linha)
         await msg.reply_text(
-            "🏪 " + b("PAINEL POR LOJA") + "\nSelecione a loja:",
+            "🏪 " + b("PAINEL POR LOJA") + "\nSelecione ou use /loja nome:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(botoes)
         )
@@ -1007,24 +1069,81 @@ async def _mostrar_painel_loja(msg, loja_nome):
     hoje = date.today()
     ini = date(hoje.year, hoje.month, 1)
     try:
-        d = ex.painel_loja(loja_nome, ini, hoje)
-        texto = header("🏪 PAINEL: {}".format(loja_nome))
+        d = ex.painel_completo_loja(loja_nome, ini, hoje)
+        if not d:
+            await msg.reply_text("Loja nao encontrada: {}".format(loja_nome))
+            return
+
+        texto = header("🏪 PAINEL COMPLETO: {}".format(d["nome_real"]))
         texto += "Periodo: {} a {}\n\n".format(ini.strftime("%d/%m"), hoje.strftime("%d/%m/%Y"))
-        texto += "📋 Registros: " + b(str(d["total"])) + "\n"
-        texto += "💵 Faturamento: " + b(moeda(d["faturamento"])) + "\n"
-        texto += "💰 Liquido: " + b(moeda(d["liquido"])) + "\n\n"
-        texto += "📝 Proc OK: {} | Pendentes: {}\n".format(d["proc_ok"], d["proc_pend"])
-        texto += "🎬 Video OK: {} | Pendentes: {}\n\n".format(d["video_ok"], d["video_pend"])
-        if d["operadores"]:
-            texto += b("Operadores:") + "\n"
-            for op, qtd in list(d["operadores"].items())[:5]:
-                barra = "█" * min(qtd, 10)
-                texto += "  👤 {} — {} {}\n".format(op[:18], barra, qtd)
+
+        # Financeiro
+        texto += b("💰 FINANCEIRO") + "\n"
+        texto += "Registros: {}\n".format(d["total_registros"])
+        texto += "Faturamento bruto: " + b(moeda(d["faturamento"])) + "\n"
+        texto += "Custo liquido: " + b(moeda(d["liquido"])) + "\n"
+        texto += "Ticket medio: " + b(moeda(d["ticket_medio"])) + "\n\n"
+
+        # Cobranca
+        cob = d["cobranca"]
+        total_cob = cob.get("total", 0)
+        texto += b("🧾 COBRANCA DO PERIODO") + "\n"
+        if cob.get("qtd_servico", 0) > 0:
+            texto += "  ATPV/ASS VEND/CV: {} x R$30 = {}\n".format(cob["qtd_servico"], moeda(cob["qtd_servico"]*30))
+        if cob.get("qtd_proc_comp", 0) > 0:
+            texto += "  Proc Comp: {} x R$75 = {}\n".format(cob["qtd_proc_comp"], moeda(cob["qtd_proc_comp"]*75))
+        if cob.get("qtd_proc_vend", 0) > 0:
+            texto += "  Proc Vend: {} x R$125 = {}\n".format(cob["qtd_proc_vend"], moeda(cob["qtd_proc_vend"]*125))
+        if cob.get("qtd_combo", 0) > 0:
+            texto += "  Combo: {} x R$125 = {}\n".format(cob["qtd_combo"], moeda(cob["qtd_combo"]*125))
+        texto += "  " + b("TOTAL A COBRAR: {}".format(moeda(total_cob))) + "\n\n"
+
+        # Procuracoes e Videos
+        texto += b("📝 PROCURACOES") + "\n"
+        texto += "  ✅ OK: {} | ⚠️ Pendentes: {} | ❓ Sem status: {}\n\n".format(
+            d["proc_ok"], d["proc_pend"], d["proc_sem"])
+        texto += b("🎬 VIDEOS") + "\n"
+        texto += "  ✅ OK: {} | ⚠️ Pendentes: {}\n\n".format(d["video_ok"], d["video_pend"])
+
+        # Pagamentos
+        if d["pagamentos"]:
+            texto += b("💳 PAGAMENTOS") + "\n"
+            for pg, qtd in list(d["pagamentos"].items())[:4]:
+                texto += "  {} — {}x\n".format(pg[:20], qtd)
             texto += "\n"
+
+        # Operadores
+        if d["operadores"]:
+            texto += b("👤 OPERADORES") + "\n"
+            for op, qtd in list(d["operadores"].items())[:5]:
+                barra = "█" * min(int(qtd / max(d["operadores"].values()) * 8), 8)
+                texto += "  {} {} — {}\n".format(op[:18], barra, qtd)
+            texto += "\n"
+
+        # Servicos
         if d["servicos"]:
-            texto += b("Servicos:") + "\n"
+            texto += b("🗂 SERVICOS") + "\n"
             for svc, qtd in list(d["servicos"].items())[:5]:
-                texto += "  📋 {} — {}\n".format(svc[:20], qtd)
+                texto += "  {} — {}x\n".format(svc[:22], qtd)
+            texto += "\n"
+
+        # Grupos
+        if d["grupos"] and len(d["grupos"]) > 1:
+            texto += b("🏢 GRUPOS") + "\n"
+            for g, qtd in d["grupos"].items():
+                texto += "  {} — {}x\n".format(g[:20], qtd)
+            texto += "\n"
+
+        # Ultimos clientes
+        if d["clientes_recentes"]:
+            texto += b("👥 ULTIMOS ATENDIMENTOS") + "\n"
+            for c in d["clientes_recentes"]:
+                proc_ico  = "✅" if "ok" in (c["proc"] or "").lower() else "⚠️"
+                video_ico = "✅" if "ok" in (c["video"] or "").lower() else "🎬"
+                texto += "  📅 {} | {} | {}\n".format(c["data"], c["cliente"][:20], c["placa"])
+                texto += "  📋 {} | 💵 {} | 👤 {}\n".format(c["servico"][:18], c["valor"], c["operador"][:12])
+                texto += "  {} {} {}\n".format(proc_ico, video_ico, c["obs"][:30] if c["obs"] else "")
+
         for chunk in _split(texto):
             await msg.reply_text(chunk, parse_mode="HTML")
     except Exception as e:
@@ -1298,6 +1417,350 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Erro: {}".format(e))
 
 
+# ── GESTAO DE PENDENCIAS (ESCRITA) ────────────────────────────────────────────
+
+async def cmd_resolver_pendentes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = get_msg(update)
+    hoje = date.today()
+    try:
+        pend = sh.procuracoes_pendentes(hoje, hoje)
+        if not pend:
+            await msg.reply_text("✅ Nenhuma procuracao pendente hoje!")
+            return
+        texto = header("⚠️ RESOLVER PENDENTES — {}".format(hoje.strftime("%d/%m/%Y")))
+        texto += "Selecione o que deseja fazer:\n\n"
+        botoes = []
+        for i, r in enumerate(pend[:10]):
+            cliente = sh._col(r, "cliente")[:20]
+            loja    = sh._col(r, "loja")[:12]
+            row_num = r.get("__row__", 0)
+            botoes.append([
+                InlineKeyboardButton(
+                    "✅ {} — {}".format(cliente, loja),
+                    callback_data="ok_proc:{}".format(row_num)
+                )
+            ])
+        botoes.append([InlineKeyboardButton("✅ MARCAR TODAS OK", callback_data="ok_proc:TODAS")])
+        await msg.reply_text(texto, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(botoes))
+    except Exception as e:
+        log.error(e)
+        await msg.reply_text("Erro: {}".format(e))
+
+
+async def cmd_resolver_videos(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = get_msg(update)
+    hoje = date.today()
+    try:
+        pend = sh.videos_pendentes(hoje, hoje)
+        if not pend:
+            await msg.reply_text("✅ Nenhum video pendente hoje!")
+            return
+        botoes = []
+        for r in pend[:10]:
+            cliente = sh._col(r, "cliente")[:20]
+            row_num = r.get("__row__", 0)
+            botoes.append([
+                InlineKeyboardButton(
+                    "✅ {}".format(cliente),
+                    callback_data="ok_video:{}".format(row_num)
+                )
+            ])
+        botoes.append([InlineKeyboardButton("✅ MARCAR TODOS OK", callback_data="ok_video:TODOS")])
+        await msg.reply_text(
+            "🎬 " + b("VIDEOS PENDENTES") + "\nClique para marcar como OK:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(botoes)
+        )
+    except Exception as e:
+        log.error(e)
+        await msg.reply_text("Erro: {}".format(e))
+
+
+async def cmd_historico_cliente(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = get_msg(update)
+    if not ctx.args:
+        await msg.reply_text("Use: /historico nome ou /historico placa")
+        return
+    termo = " ".join(ctx.args)
+    try:
+        registros = sh.historico_cliente(termo)
+        if not registros:
+            await msg.reply_text("Nenhum historico encontrado para: {}".format(termo))
+            return
+        texto = header("📋 HISTORICO: {}".format(termo.upper()))
+        texto += b("{} atendimento(s) encontrado(s)".format(len(registros))) + "\n\n"
+        for r in registros[:20]:
+            proc  = sh._col(r, "procuracao") or "—"
+            video = sh._col(r, "video") or "—"
+            proc_ico  = "✅" if "ok" in proc.lower() else "⚠️"
+            video_ico = "✅" if "ok" in video.lower() else "🎬"
+            texto += "📅 " + b(sh._col(r, "data")) + " | 🏪 {}\n".format(sh._col(r, "loja"))
+            texto += "👤 {} | 🚗 {}\n".format(sh._col(r, "cliente")[:22], sh._col(r, "placa"))
+            texto += "📋 {} | 💵 {}\n".format(sh._col(r, "servico")[:20], sh._col(r, "valor"))
+            texto += "{} Proc: {} | {} Video: {}\n".format(proc_ico, proc[:15], video_ico, video[:15])
+            texto += "👤 Operador: {}\n".format(sh._col(r, "feito_por"))
+            obs = sh._col(r, "observacao") or sh._col(r, "mensagem")
+            if obs:
+                texto += "💬 {}\n".format(obs[:40])
+            texto += "\n"
+        if len(registros) > 20:
+            texto += "...e mais {} registros.".format(len(registros) - 20)
+        for chunk in _split(texto):
+            await msg.reply_text(chunk, parse_mode="HTML")
+    except Exception as e:
+        log.error(e)
+        await msg.reply_text("Erro: {}".format(e))
+
+
+async def cmd_comparativo_grupos(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = get_msg(update)
+    try:
+        hoje = date.today()
+        ini = date(hoje.year, hoje.month, 1)
+        grupos = sh.resumo_por_grupo(ini, hoje)
+        if not grupos:
+            await msg.reply_text("Sem dados de grupos.")
+            return
+        total_fat = sum(g["faturamento"] for g in grupos.values())
+        total_qtd = sum(g["qtd"] for g in grupos.values())
+        texto = header("🏢 UNICAR vs UNIAO — {}".format(ini.strftime("%m/%Y")))
+        texto += "Total geral: " + b(moeda(total_fat)) + "\n\n"
+        for grupo, d in grupos.items():
+            barra = "█" * min(int(d["faturamento"] / max(total_fat, 1) * 10), 10)
+            texto += b(grupo) + "\n"
+            texto += "  {} Registros: {}\n".format(barra, d["qtd"])
+            texto += "  💵 Faturamento: {} ({}%)\n".format(
+                moeda(d["faturamento"]),
+                int(d["faturamento"]/total_fat*100) if total_fat else 0)
+            texto += "  💰 Liquido: {}\n\n".format(moeda(d["liquido"]))
+        await msg.reply_text(texto, parse_mode="HTML")
+    except Exception as e:
+        log.error(e)
+        await msg.reply_text("Erro: {}".format(e))
+
+
+async def cmd_meta_lojas(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = get_msg(update)
+    META_DIARIA = int(os.environ.get("META_DIARIA", "5"))
+    try:
+        hoje = date.today()
+        rows = sh._fetch()
+        lojas_hoje = defaultdict(int)
+        for r in rows:
+            if sh._parse_date(sh._col(r, "data")) == hoje:
+                loja = sh._col(r, "loja") or "Sem Loja"
+                lojas_hoje[loja] += 1
+        texto = header("🎯 METAS DO DIA — {}".format(hoje.strftime("%d/%m/%Y")))
+        texto += "Meta diaria por loja: " + b(str(META_DIARIA)) + " servicos\n\n"
+        bateu = []
+        nao_bateu = []
+        for loja, qtd in sorted(lojas_hoje.items(), key=lambda x: x[1], reverse=True):
+            pct_meta = int(qtd / META_DIARIA * 100)
+            barra = "█" * min(int(qtd / META_DIARIA * 10), 10)
+            if qtd >= META_DIARIA:
+                bateu.append((loja, qtd, barra, pct_meta))
+            else:
+                nao_bateu.append((loja, qtd, barra, pct_meta))
+        if bateu:
+            texto += "✅ " + b("BATERAM A META:") + "\n"
+            for loja, qtd, barra, pct in bateu:
+                texto += "  🏆 {} {} {}/{}  ({}%)\n".format(loja[:18], barra, qtd, META_DIARIA, pct)
+            texto += "\n"
+        if nao_bateu:
+            texto += "⚠️ " + b("ABAIXO DA META:") + "\n"
+            for loja, qtd, barra, pct in nao_bateu:
+                falta = META_DIARIA - qtd
+                texto += "  📍 {} {} {}/{} (faltam {})\n".format(loja[:18], barra, qtd, META_DIARIA, falta)
+        await msg.reply_text(texto, parse_mode="HTML")
+    except Exception as e:
+        log.error(e)
+        await msg.reply_text("Erro: {}".format(e))
+
+
+async def cmd_relatorio_pdf(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = get_msg(update)
+    await msg.reply_text(
+        "📄 " + b("RELATORIO MENSAL PDF") + "\n\nSelecione a empresa:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏢 Unicar",    callback_data="rel_pdf:unicar"),
+             InlineKeyboardButton("🏢 Uniaocert", callback_data="rel_pdf:uniao")],
+            [InlineKeyboardButton("📊 Ambas",     callback_data="rel_pdf:ambas")],
+        ])
+    )
+
+
+async def _gerar_relatorio_pdf(msg, empresa_key):
+    await msg.reply_text("⏳ Gerando relatorio mensal, aguarde...")
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib import colors
+        from reportlab.lib.units import cm
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+        from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+        import io
+        from calendar import monthrange
+
+        hoje = date.today()
+        ini = date(hoje.year, hoje.month, 1)
+        fim = date(hoje.year, hoje.month, monthrange(hoje.year, hoje.month)[1])
+
+        emp_map = {
+            "unicar": [cb.EMPRESAS["unicar"]],
+            "uniao":  [cb.EMPRESAS["uniao"]],
+            "ambas":  [cb.EMPRESAS["unicar"], cb.EMPRESAS["uniao"]],
+        }
+        empresas = emp_map.get(empresa_key, [cb.EMPRESAS["unicar"]])
+
+        r_mes    = sh.resumo_periodo(ini, fim)
+        ranking  = sh.ranking_lojas(ini, fim, top=10)
+        ops      = sh.ranking_operadores(ini, fim, top=10)
+        svcs     = sh.servicos_por_tipo(ini, fim)
+        grupos   = sh.resumo_por_grupo(ini, fim)
+        pgs      = sh.formas_pagamento(ini, fim)
+        dados_cob = cb.calcular_cobranca(ini, fim)
+        total_cob = sum(d["total"] for d in dados_cob.values())
+
+        COR_P  = colors.HexColor("#1a3c6e")
+        COR_S  = colors.HexColor("#2e6db4")
+        COR_BG = colors.HexColor("#f0f4fa")
+        COR_OK = colors.HexColor("#1a7a3c")
+
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4,
+            leftMargin=2*cm, rightMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+        styles = getSampleStyleSheet()
+
+        def sp(name, **kw): return ParagraphStyle(name, **kw)
+        s_tit  = sp("t", fontSize=18, fontName="Helvetica-Bold", textColor=COR_P, alignment=TA_CENTER)
+        s_sub  = sp("s", fontSize=10, fontName="Helvetica",      textColor=colors.grey, alignment=TA_CENTER)
+        s_h2   = sp("h", fontSize=12, fontName="Helvetica-Bold", textColor=COR_P, spaceBefore=10)
+        s_tot  = sp("tt",fontSize=13, fontName="Helvetica-Bold", textColor=COR_OK, alignment=TA_RIGHT)
+        s_rod  = sp("r", fontSize=7,  fontName="Helvetica",      textColor=colors.grey, alignment=TA_CENTER)
+
+        story = []
+
+        # Cabecalho
+        for emp in empresas:
+            story.append(Paragraph(emp["nome"], s_tit))
+            story.append(Paragraph(emp["fantasia"] + " | CNPJ: " + emp["cnpj"], s_sub))
+        story.append(Paragraph("RELATORIO MENSAL — {}/{}".format(
+            str(hoje.month).zfill(2), hoje.year), s_sub))
+        story.append(HRFlowable(width="100%", thickness=2, color=COR_P, spaceAfter=10))
+
+        def moeda_r(v): return "R$ {:,.2f}".format(v).replace(",","X").replace(".",",").replace("X",".")
+
+        # Resumo executivo
+        story.append(Paragraph("RESUMO EXECUTIVO", s_h2))
+        res_data = [
+            ["Indicador", "Valor"],
+            ["Total de Registros", str(r_mes["total"])],
+            ["Faturamento Bruto", moeda_r(r_mes["faturamento"])],
+            ["Custo Liquido", moeda_r(r_mes["liquido"])],
+            ["Procuracoes", str(r_mes["procuracoes"])],
+            ["Total a Cobrar (Lojas)", moeda_r(total_cob)],
+        ]
+        rt = Table(res_data, colWidths=[10*cm, 7*cm])
+        rt.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),COR_P), ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"), ("FONTSIZE",(0,0),(-1,-1),10),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, COR_BG]),
+            ("GRID",(0,0),(-1,-1),0.5,colors.HexColor("#dddddd")),
+            ("TOPPADDING",(0,0),(-1,-1),6), ("BOTTOMPADDING",(0,0),(-1,-1),6),
+            ("LEFTPADDING",(0,0),(-1,-1),8),
+        ]))
+        story.append(rt)
+        story.append(Spacer(1, 10))
+
+        # Ranking lojas
+        story.append(Paragraph("RANKING DE LOJAS", s_h2))
+        rank_data = [["#", "Loja", "Registros", "Faturamento"]]
+        for i, (loja, qtd, fat) in enumerate(ranking, 1):
+            rank_data.append([str(i), loja, str(qtd), moeda_r(fat)])
+        rkt = Table(rank_data, colWidths=[1*cm, 9*cm, 3*cm, 4*cm])
+        rkt.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),COR_S), ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"), ("FONTSIZE",(0,0),(-1,-1),9),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, COR_BG]),
+            ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#dddddd")),
+            ("ALIGN",(2,0),(-1,-1),"CENTER"),
+            ("TOPPADDING",(0,0),(-1,-1),5), ("BOTTOMPADDING",(0,0),(-1,-1),5),
+        ]))
+        story.append(rkt)
+        story.append(Spacer(1, 10))
+
+        # Operadores
+        story.append(Paragraph("RANKING DE OPERADORES", s_h2))
+        op_data = [["#", "Operador", "Servicos"]]
+        for i, (op, qtd) in enumerate(ops, 1):
+            op_data.append([str(i), op, str(qtd)])
+        opt = Table(op_data, colWidths=[1*cm, 12*cm, 4*cm])
+        opt.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),COR_S), ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"), ("FONTSIZE",(0,0),(-1,-1),9),
+            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, COR_BG]),
+            ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#dddddd")),
+            ("TOPPADDING",(0,0),(-1,-1),5), ("BOTTOMPADDING",(0,0),(-1,-1),5),
+        ]))
+        story.append(opt)
+        story.append(Spacer(1, 10))
+
+        # Grupos
+        if grupos:
+            story.append(Paragraph("RESUMO POR GRUPO", s_h2))
+            grp_data = [["Grupo", "Registros", "Faturamento", "Liquido"]]
+            for grp, d in grupos.items():
+                grp_data.append([grp, str(d["qtd"]), moeda_r(d["faturamento"]), moeda_r(d["liquido"])])
+            grpt = Table(grp_data, colWidths=[6*cm, 3*cm, 4.5*cm, 4.5*cm])
+            grpt.setStyle(TableStyle([
+                ("BACKGROUND",(0,0),(-1,0),COR_S), ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+                ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"), ("FONTSIZE",(0,0),(-1,-1),9),
+                ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white, COR_BG]),
+                ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#dddddd")),
+                ("TOPPADDING",(0,0),(-1,-1),5), ("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ]))
+            story.append(grpt)
+            story.append(Spacer(1, 10))
+
+        # Cobranca por loja
+        story.append(Paragraph("COBRANCA POR LOJA", s_h2))
+        cob_data = [["Loja", "Servicos", "Proc", "Combo", "Total"]]
+        for loja, d in sorted(dados_cob.items()):
+            if d["total"] == 0: continue
+            cob_data.append([loja[:25], str(d["qtd_servico"]), str(d["qtd_proc_vend"]+d["qtd_proc_comp"]),
+                            str(d["qtd_combo"]), moeda_r(d["total"])])
+        cob_data.append(["TOTAL GERAL", "", "", "", moeda_r(total_cob)])
+        cobt = Table(cob_data, colWidths=[7*cm, 2.5*cm, 2.5*cm, 2.5*cm, 3.5*cm])
+        cobt.setStyle(TableStyle([
+            ("BACKGROUND",(0,0),(-1,0),COR_P), ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+            ("BACKGROUND",(0,-1),(-1,-1),COR_OK), ("TEXTCOLOR",(0,-1),(-1,-1),colors.white),
+            ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"), ("FONTNAME",(0,-1),(-1,-1),"Helvetica-Bold"),
+            ("FONTSIZE",(0,0),(-1,-1),9),
+            ("ROWBACKGROUNDS",(0,1),(-1,-2),[colors.white, COR_BG]),
+            ("GRID",(0,0),(-1,-1),0.3,colors.HexColor("#dddddd")),
+            ("ALIGN",(1,0),(-1,-1),"CENTER"),
+            ("TOPPADDING",(0,0),(-1,-1),5), ("BOTTOMPADDING",(0,0),(-1,-1),5),
+        ]))
+        story.append(cobt)
+        story.append(Spacer(1, 16))
+        story.append(HRFlowable(width="100%", thickness=0.5, color=colors.grey))
+        story.append(Spacer(1, 4))
+        story.append(Paragraph(
+            "Relatorio gerado em {} | Periodo: {}/{} | Sistema de Gestao".format(
+                hoje.strftime("%d/%m/%Y"), str(hoje.month).zfill(2), hoje.year), s_rod))
+
+        doc.build(story)
+        pdf_bytes = buf.getvalue()
+        nome = "relatorio_{}_{}{}.pdf".format(empresa_key, str(hoje.month).zfill(2), hoje.year)
+        await msg.reply_document(document=pdf_bytes, filename=nome,
+            caption="📊 Relatorio mensal {}/{} gerado!".format(str(hoje.month).zfill(2), hoje.year))
+
+    except Exception as e:
+        log.error(e)
+        await msg.reply_text("Erro ao gerar relatorio: {}".format(e))
+
+
 def main():
     token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = Application.builder().token(token).build()
@@ -1326,6 +1789,12 @@ def main():
     app.add_handler(CommandHandler("operador",       cmd_painel_op))
     app.add_handler(CommandHandler("clientes_dia",   cmd_clientes_dia))
     app.add_handler(CommandHandler("sem_movimento",  cmd_sem_movimento))
+    app.add_handler(CommandHandler("resolver",       cmd_resolver_pendentes))
+    app.add_handler(CommandHandler("videos_ok",      cmd_resolver_videos))
+    app.add_handler(CommandHandler("historico",      cmd_historico_cliente))
+    app.add_handler(CommandHandler("grupos_cmp",     cmd_comparativo_grupos))
+    app.add_handler(CommandHandler("metas",          cmd_meta_lojas))
+    app.add_handler(CommandHandler("relatorio",      cmd_relatorio_pdf))
     app.add_handler(CommandHandler("status",         cmd_status))
     app.add_handler(CommandHandler("cobranca",      cmd_cobranca))
     app.add_handler(CallbackQueryHandler(callback_handler))

@@ -192,3 +192,115 @@ def listar_lojas_periodo(data_ini: date, data_fim: date) -> list[str]:
             if loja:
                 lojas.add(loja.strip())
     return sorted(lojas)
+
+
+def painel_completo_loja(loja_nome: str, data_ini: date, data_fim: date) -> dict:
+    """Painel 360 da loja com todos os dados financeiros e operacionais"""
+    rows = sh._fetch()
+    itens = []
+    for r in rows:
+        d = sh._parse_date(sh._col(r, "data"))
+        if not d or not (data_ini <= d <= data_fim):
+            continue
+        if loja_nome.lower().strip() in sh._col(r, "loja").lower().strip():
+            itens.append(r)
+
+    if not itens:
+        return {}
+
+    faturamento  = sum(sh._parse_value(sh._col(r, "valor")) for r in itens)
+    liquido      = sum(sh._parse_value(sh._col(r, "liquido")) for r in itens)
+    ticket_medio = faturamento / len(itens) if itens else 0
+
+    # Procuracoes
+    proc_ok   = [r for r in itens if "ok" in sh._col(r, "procuracao").lower()]
+    proc_pend = [r for r in itens if "ok" not in sh._col(r, "procuracao").lower() and sh._col(r, "procuracao").strip()]
+    proc_sem  = [r for r in itens if not sh._col(r, "procuracao").strip()]
+
+    # Videos
+    video_ok   = [r for r in itens if "ok" in sh._col(r, "video").lower()]
+    video_pend = [r for r in itens if "ok" not in sh._col(r, "video").lower() and sh._col(r, "video").strip()]
+
+    # Pagamentos
+    pgs = defaultdict(int)
+    for r in itens:
+        pg = sh._col(r, "pagamento") or "Nao informado"
+        pgs[pg] += 1
+
+    # Operadores
+    ops = defaultdict(int)
+    for r in itens:
+        op = sh._col(r, "feito_por") or "?"
+        ops[op] += 1
+
+    # Servicos
+    svcs = defaultdict(int)
+    for r in itens:
+        svc = sh._col(r, "servico") or "?"
+        svcs[svc] += 1
+
+    # Grupos
+    grupos = defaultdict(int)
+    for r in itens:
+        g = sh._col(r, "grupo") or "?"
+        grupos[g] += 1
+
+    # Por dia
+    por_dia = defaultdict(int)
+    for r in itens:
+        por_dia[sh._col(r, "data")] += 1
+
+    # Clientes recentes
+    clientes_recentes = []
+    for r in sorted(itens, key=lambda x: sh._col(x, "data"), reverse=True)[:5]:
+        clientes_recentes.append({
+            "data":      sh._col(r, "data"),
+            "cliente":   sh._col(r, "cliente"),
+            "placa":     sh._col(r, "placa"),
+            "servico":   sh._col(r, "servico"),
+            "valor":     sh._col(r, "valor"),
+            "proc":      sh._col(r, "procuracao"),
+            "video":     sh._col(r, "video"),
+            "operador":  sh._col(r, "feito_por"),
+            "obs":       sh._col(r, "observacao") or sh._col(r, "mensagem"),
+        })
+
+    # Calcula cobranca
+    import cobranca as cb
+    dados_cob = cb.calcular_cobranca(data_ini, data_fim, loja_nome)
+    loja_key = next((k for k in dados_cob if loja_nome.lower() in k.lower()), None)
+    cobranca = dados_cob.get(loja_key, {"total": 0, "qtd_servico": 0, "qtd_proc_comp": 0, "qtd_proc_vend": 0, "qtd_combo": 0})
+
+    return {
+        "loja":             loja_nome,
+        "total_registros":  len(itens),
+        "faturamento":      faturamento,
+        "liquido":          liquido,
+        "ticket_medio":     ticket_medio,
+        "proc_ok":          len(proc_ok),
+        "proc_pend":        len(proc_pend),
+        "proc_sem":         len(proc_sem),
+        "video_ok":         len(video_ok),
+        "video_pend":       len(video_pend),
+        "pagamentos":       dict(sorted(pgs.items(), key=lambda x: x[1], reverse=True)),
+        "operadores":       dict(sorted(ops.items(), key=lambda x: x[1], reverse=True)),
+        "servicos":         dict(sorted(svcs.items(), key=lambda x: x[1], reverse=True)),
+        "grupos":           dict(sorted(grupos.items(), key=lambda x: x[1], reverse=True)),
+        "por_dia":          dict(sorted(por_dia.items())),
+        "clientes_recentes": clientes_recentes,
+        "cobranca":         cobranca,
+        "nome_real":        loja_key or loja_nome,
+    }
+
+
+def buscar_loja(termo: str, data_ini: date, data_fim: date) -> list[str]:
+    """Busca lojas que contem o termo no nome"""
+    rows = sh._fetch()
+    lojas = set()
+    for r in rows:
+        d = sh._parse_date(sh._col(r, "data"))
+        if d and data_ini <= d <= data_fim:
+            loja = sh._col(r, "loja").strip()
+            if loja and termo.lower() in loja.lower():
+                lojas.add(loja)
+    return sorted(lojas)
